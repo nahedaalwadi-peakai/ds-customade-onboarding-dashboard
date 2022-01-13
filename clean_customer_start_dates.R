@@ -39,40 +39,61 @@ set_credentials <- function(){
 }
 
 con <- set_credentials()
+
+# get staged dataset:
 query <-paste0("SELECT * FROM stage.customer_start_dates;")
 data <- DBI::dbGetQuery(con, query)
+# data <- data %>% filter(cus_customer_name == "Choice Trade Frames")
 
-data$remove <- 0
-new_rows <- setNames(data.frame(matrix(ncol = ncol(data), nrow = 0)), colnames(data))
 
-for (i in 1:nrow(data)) {
-  if ((str_detect(data[i,]$product, "&") | str_detect(data[i,]$product, ",")) == TRUE) {
-    products <- str_split(data[i,]$product, "&", simplify = T)
-    row <- data[i,]
-    data[i,]$remove = 1
-    for (ii in 1:ncol(products)) {
-      product <- str_trim(products[1,ii])
-      new <- row
-      new$product <- product
-      new_rows<-rbind(new_rows, new)
-    }
-  }}
+expand_multiple_entries <- function(col_name, data) {
+  # add flag to indicate rows with multiple entries
+  data$remove <- 0
+  # create clean DF
+  new_rows <<- setNames(data.frame(matrix(ncol = ncol(data), nrow = 0)), colnames(data))
+  
+  for (i in 1:nrow(data)) {
 
-cleaned <- data %>% filter(remove!=1)
-cleaned <- rbind(cleaned, new_rows)
-cleansed <- cleaned %>% mutate(product = str_trim(product)) %>% select(-remove)
+    # identify rows with multiple entries in col_name
+    if ((str_detect(data[i,col_name], "&") | str_detect(data[i,col_name], ",")) == TRUE) {
+      values <- str_split(data[i,col_name], "[&,]", simplify = T)
+      row <- data[i,]
+      data[i,]$remove = 1
+      for (ii in 1:ncol(values)) {
+        value <- str_trim(values[1,ii])
+        new_row <- row
+        new_row[[col_name]] <- value
+        new_rows<-rbind(new_rows, new_row)
+      }
+    }}
+
+  cleansed_df <- data %>% filter(remove!=1)
+  cleansed_df <- rbind(new_rows, cleansed_df)
+  final_df <- cleansed_df %>% select(-remove)
+  return(final_df)
+}
+
+# expand product col
+expanded_df <- expand_multiple_entries('product', data)
+# expand customer account number
+expanded_df <- expand_multiple_entries('cus_account_number', expanded_df)
+
+# clean whitespace in all cols
+clean_df <- expanded_df %>%
+  mutate_if(is.character, str_trim)
 
 # write to s3
 bucket <- "kilimanjaro-prod-datalake"
 path <- "customade/datascience/customer_start_dates/"
 path <- paste(path, "customer_start_dates-", Sys.Date(), '.csv', sep='')
 
-s3write_using(cleansed,
+s3write_using(clean_df,
               FUN = write.csv,
               object = path,
-              bucket = config$s3_bucket,
+              bucket = bucket,
               row.names = FALSE)
 
+DBI::dbGetQuery(con, paste0("TRUNCATE TABLE transform.customer_start_dates;"))
 DBI::dbGetQuery(con, paste0("copy transform.customer_start_dates
                   from '",  paste('s3:/', bucket, path, sep='/'), "'
                   iam_role 'arn:aws:iam::794236216820:role/RedshiftS3Access'
@@ -80,5 +101,3 @@ DBI::dbGetQuery(con, paste0("copy transform.customer_start_dates
                   EMPTYASNULL
                   ignoreheader 1
                   csv;", sep=''))
-
-
